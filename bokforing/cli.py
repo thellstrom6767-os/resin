@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 import click
 
 from . import underlag as underlag_module
-from .reports import generate_resultatrapport
+from .reports import generate_balansrapport, generate_resultatrapport
 
 from . import sie as sie_module
 from .ledger import (find_account, get_account_history, get_balances,
@@ -378,6 +378,25 @@ def report(ctx, prev_sie, output):
     if prev:
         click.echo(f'  Current year : {sie.year_begins} – {sie.year_ends}')
         click.echo(f'  Previous year: {prev.year_begins} – {prev.year_ends}')
+
+
+@cli.command()
+@click.option('--output', '-o', default=None, metavar='FILE',
+              help='Output .ods file (default: Balansrapport_YYYY-MM-DD-YYYY-MM-DD.ods)')
+@click.pass_context
+def balansrapport(ctx, output):
+    """Generate a Balansrapport (balance sheet) as a LibreOffice ODS file."""
+    path = _resolve_ledger(ctx.obj)
+    sie = sie_module.parse(path)
+
+    if output is None:
+        b = f'{sie.year_begins[:4]}-{sie.year_begins[4:6]}-{sie.year_begins[6:]}'
+        e = f'{sie.year_ends[:4]}-{sie.year_ends[4:6]}-{sie.year_ends[6:]}'
+        output = os.path.join(os.path.dirname(os.path.abspath(path)),
+                              f'Balansrapport_{b}-{e}.ods')
+
+    generate_balansrapport(sie, output)
+    click.echo(f'Written {output}')
 
 
 # ─── underlag ────────────────────────────────────────────────────────────────

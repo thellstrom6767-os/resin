@@ -1,4 +1,4 @@
-"""Generate a Resultatrapport (income statement) as a LibreOffice Calc ODS file."""
+"""Generate Resultatrapport and Balansrapport as LibreOffice Calc ODS files."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -451,6 +451,251 @@ def generate_resultatrapport(
     _empty_row(sheet)
     tr = TableRow()
     tc = TableCell(stylename='meta', numbercolumnsspanned='7')
+    tc.addElement(P(text=f'Genererad {datetime.now().strftime("%Y-%m-%d %H:%M")}'))
+    tr.addElement(tc)
+    sheet.addElement(tr)
+
+    doc.save(output_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Balansrapport
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _bal_empty_row(sheet: Table):
+    tr = TableRow()
+    for _ in range(4):
+        tc = TableCell(stylename='empty')
+        tc.addElement(P(text=''))
+        tr.addElement(tc)
+    sheet.addElement(tr)
+
+
+def _bal_account_row(sheet: Table, label: str,
+                     ib_val: Decimal, per_val: Decimal, utg_val: Decimal,
+                     indent: str = '  '):
+    tr = TableRow()
+    tr.addElement(_text_cell(indent + label, 'desc'))
+    tr.addElement(_num_cell(_sek(ib_val),  'num'))
+    tr.addElement(_num_cell(_sek(per_val), 'num'))
+    tr.addElement(_num_cell(_sek(utg_val), 'num'))
+    sheet.addElement(tr)
+
+
+def _bal_subtotal_row(sheet: Table, title: str,
+                      ib_val: Decimal, per_val: Decimal, utg_val: Decimal,
+                      style_prefix: str = 'sub'):
+    tr = TableRow()
+    tr.addElement(_text_cell(title,         f'{style_prefix}_lbl'))
+    tr.addElement(_num_cell(_sek(ib_val),   f'{style_prefix}_num'))
+    tr.addElement(_num_cell(_sek(per_val),  f'{style_prefix}_num'))
+    tr.addElement(_num_cell(_sek(utg_val),  f'{style_prefix}_num'))
+    sheet.addElement(tr)
+
+
+def generate_balansrapport(sie: SIEFile, output_path: str) -> None:
+    """Generate a Balansrapport (balance sheet) as an ODS file."""
+
+    # ── compute period changes from transactions ───────────────────────────
+    period: dict[str, Decimal] = {}
+    for v in sie.vouchers:
+        for t in v.transactions:
+            period[t.account] = period.get(t.account, Z) + t.amount
+
+    labels = {a.number: a.label for a in sie.accounts}
+
+    def ib(acc: str) -> Decimal:
+        return sie.ib.get(acc, Z)
+
+    def per(acc: str) -> Decimal:
+        return period.get(acc, Z)
+
+    def utg(acc: str) -> Decimal:
+        return ib(acc) + per(acc)
+
+    def section_rows(lo: int, hi: int) -> list[tuple[str, str, Decimal, Decimal, Decimal]]:
+        keys = {k for k in list(sie.ib) + list(period)
+                if k.isdigit() and lo <= int(k) < hi}
+        rows = []
+        for nr in sorted(keys):
+            iv, pv, uv = ib(nr), per(nr), utg(nr)
+            if iv != Z or pv != Z or uv != Z:
+                rows.append((nr, labels.get(nr, nr), iv, pv, uv))
+        return rows
+
+    def section_totals(lo: int, hi: int) -> tuple[Decimal, Decimal, Decimal]:
+        rows = section_rows(lo, hi)
+        return (sum((r[2] for r in rows), Z),
+                sum((r[3] for r in rows), Z),
+                sum((r[4] for r in rows), Z))
+
+    # ── build document ─────────────────────────────────────────────────────
+    doc = OpenDocumentSpreadsheet()
+    _make_styles(doc)
+
+    sheet = Table(name='Balansrapport')
+    doc.spreadsheet.addElement(sheet)
+
+    for w in ['9.5cm', '2.8cm', '2.8cm', '2.8cm']:
+        style = Style(name=f'bcol_{w}', family='table-column')
+        style.addElement(TableColumnProperties(columnwidth=w))
+        doc.automaticstyles.addElement(style)
+        col = TableColumn()
+        col.setAttribute('stylename', f'bcol_{w}')
+        sheet.addElement(col)
+
+    # ── header ────────────────────────────────────────────────────────────
+    for text, style in [('Balansrapport', 'title'),
+                        (sie.company_name, 'meta')]:
+        tr = TableRow()
+        tc = TableCell(stylename=style, numbercolumnsspanned='4')
+        tc.addElement(P(text=text))
+        tr.addElement(tc)
+        sheet.addElement(tr)
+
+    last_ver = sie.vouchers[-1] if sie.vouchers else None
+    bokslut = (f'Bokslut {sie.year_ends[:6]} tom ver '
+               f'{last_ver.series} {last_ver.number}') if last_ver else ''
+    period_str = (f'{sie.year_begins[:4]}-{sie.year_begins[4:6]}-{sie.year_begins[6:]}'
+                  f' – '
+                  f'{sie.year_ends[:4]}-{sie.year_ends[4:6]}-{sie.year_ends[6:]}')
+    for text in [bokslut, f'Räkenskapsår {period_str}']:
+        tr = TableRow()
+        tc = TableCell(stylename='meta', numbercolumnsspanned='4')
+        tc.addElement(P(text=text))
+        tr.addElement(tc)
+        sheet.addElement(tr)
+
+    _bal_empty_row(sheet)
+
+    # Column headers
+    ing_date  = sie.year_begins[2:]                    # e.g. 240101
+    per_range = f'{sie.year_begins[2:]}-{sie.year_ends[2:]}'
+    utg_date  = f'=>{sie.year_ends[2:]}'
+
+    tr = TableRow()
+    tr.addElement(_text_cell('', 'empty'))
+    tr.addElement(_text_cell('ING BALANS',   'col_head'))
+    tr.addElement(_text_cell('DENNA PERIOD', 'col_head'))
+    tr.addElement(_text_cell('UTG SALDO',    'col_head'))
+    sheet.addElement(tr)
+
+    tr = TableRow()
+    tr.addElement(_text_cell('', 'empty'))
+    tr.addElement(_text_cell(ing_date,  'col_date'))
+    tr.addElement(_text_cell(per_range, 'col_date'))
+    tr.addElement(_text_cell(utg_date,  'col_date'))
+    sheet.addElement(tr)
+
+    _bal_empty_row(sheet)
+
+    # ── helper: emit one subsection ────────────────────────────────────────
+    def subsection(title: str, lo: int, hi: int, sum_title: str,
+                   indent: str = '  ') -> tuple[Decimal, Decimal, Decimal]:
+        rows = section_rows(lo, hi)
+        si, sp, su = section_totals(lo, hi)
+        if not rows and si == Z and sp == Z and su == Z:
+            return Z, Z, Z
+        tr = TableRow()
+        tr.addElement(_text_cell(indent[:-2] + title if indent else title, 'subsect'))
+        for _ in range(3):
+            tr.addElement(_text_cell('', 'empty'))
+        sheet.addElement(tr)
+        for nr, lbl, iv, pv, uv in rows:
+            _bal_account_row(sheet, f'{nr} {lbl}', iv, pv, uv, indent)
+        _bal_subtotal_row(sheet, sum_title, si, sp, su)
+        return si, sp, su
+
+    # ── TILLGÅNGAR ─────────────────────────────────────────────────────────
+    tr = TableRow()
+    tr.addElement(_text_cell('TILLGÅNGAR', 'sect'))
+    for _ in range(3):
+        tr.addElement(_text_cell('', 'empty'))
+    sheet.addElement(tr)
+
+    # Anläggningstillgångar 1100-1399
+    anl_i, anl_p, anl_u = subsection('Anläggningstillgångar', 1100, 1400,
+                                      'Summa anläggningstillgångar')
+    _bal_empty_row(sheet)
+
+    # Omsättningstillgångar: contains sub-subsections
+    oms_rows_exist = any(
+        section_rows(lo, hi)
+        for lo, hi in [(1400, 1500), (1500, 1800), (1800, 1900), (1900, 2000)]
+    )
+    if oms_rows_exist:
+        tr = TableRow()
+        tr.addElement(_text_cell('Omsättningstillgångar', 'subsect'))
+        for _ in range(3):
+            tr.addElement(_text_cell('', 'empty'))
+        sheet.addElement(tr)
+
+    var_i, var_p, var_u = subsection('Varulager', 1400, 1500,
+                                     'Summa varulager', indent='    ')
+    if var_i != Z or var_p != Z or var_u != Z:
+        _bal_empty_row(sheet)
+
+    fod_i, fod_p, fod_u = subsection('Fordringar', 1500, 1800,
+                                      'Summa fordringar', indent='    ')
+    if fod_i != Z or fod_p != Z or fod_u != Z:
+        _bal_empty_row(sheet)
+
+    plc_i, plc_p, plc_u = subsection('Kortfristiga placeringar', 1800, 1900,
+                                      'Summa kortfristiga placeringar', indent='    ')
+    if plc_i != Z or plc_p != Z or plc_u != Z:
+        _bal_empty_row(sheet)
+
+    kas_i, kas_p, kas_u = subsection('Kassa och bank', 1900, 2000,
+                                      'Summa kassa och bank', indent='    ')
+
+    oms_i = var_i + fod_i + plc_i + kas_i
+    oms_p = var_p + fod_p + plc_p + kas_p
+    oms_u = var_u + fod_u + plc_u + kas_u
+    if oms_i != Z or oms_p != Z or oms_u != Z:
+        _bal_empty_row(sheet)
+        _bal_subtotal_row(sheet, 'Summa omsättningstillgångar',
+                          oms_i, oms_p, oms_u)
+
+    _bal_empty_row(sheet)
+    tot_till_i = anl_i + oms_i
+    tot_till_p = anl_p + oms_p
+    tot_till_u = anl_u + oms_u
+    _bal_subtotal_row(sheet, 'SUMMA TILLGÅNGAR',
+                      tot_till_i, tot_till_p, tot_till_u, style_prefix='total')
+
+    _bal_empty_row(sheet)
+
+    # ── EGET OCH FRÄMMANDE KAPITAL ─────────────────────────────────────────
+    tr = TableRow()
+    tr.addElement(_text_cell('EGET OCH FRÄMMANDE KAPITAL', 'sect'))
+    for _ in range(3):
+        tr.addElement(_text_cell('', 'empty'))
+    sheet.addElement(tr)
+
+    EK_SECTIONS = [
+        ('Eget kapital',         2000, 2100, 'Summa eget kapital'),
+        ('Obeskattade reserver', 2100, 2200, 'Summa obeskattade reserver'),
+        ('Avsättningar',         2200, 2300, 'Summa avsättningar'),
+        ('Långfristiga skulder', 2300, 2400, 'Summa långfristiga skulder'),
+        ('Kortfristiga skulder', 2400, 3000, 'Summa kortfristiga skulder'),
+    ]
+
+    tot_kap_i = tot_kap_p = tot_kap_u = Z
+    for title, lo, hi, sum_title in EK_SECTIONS:
+        si, sp, su = subsection(title, lo, hi, sum_title)
+        tot_kap_i += si
+        tot_kap_p += sp
+        tot_kap_u += su
+        if si != Z or sp != Z or su != Z:
+            _bal_empty_row(sheet)
+
+    _bal_subtotal_row(sheet, 'SUMMA EGET OCH FRÄMMANDE KAPITAL',
+                      tot_kap_i, tot_kap_p, tot_kap_u, style_prefix='total')
+
+    # ── footer ────────────────────────────────────────────────────────────
+    _bal_empty_row(sheet)
+    tr = TableRow()
+    tc = TableCell(stylename='meta', numbercolumnsspanned='4')
     tc.addElement(P(text=f'Genererad {datetime.now().strftime("%Y-%m-%d %H:%M")}'))
     tr.addElement(tc)
     sheet.addElement(tr)
