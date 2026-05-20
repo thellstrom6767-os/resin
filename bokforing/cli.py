@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 import click
 
 from . import underlag as underlag_module
+from .reports import generate_resultatrapport
 
 from . import sie as sie_module
 from .ledger import (find_account, get_account_history, get_balances,
@@ -344,6 +345,39 @@ def verify(ctx):
     else:
         click.echo(click.style(
             f'All {len(sie.vouchers)} vouchers in {path} balance. ✓', fg='green'))
+
+
+# ─── report ──────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option('--prev-sie', '-p', default=None, metavar='FILE',
+              help='Previous year SIE file for comparison column')
+@click.option('--output', '-o', default=None, metavar='FILE',
+              help='Output .ods file (default: Resultatrapport_YYYY-MM-DD-YYYY-MM-DD.ods)')
+@click.pass_context
+def report(ctx, prev_sie, output):
+    """Generate a Resultatrapport (income statement) as a LibreOffice ODS file."""
+    path = _resolve_ledger(ctx.obj)
+    sie = sie_module.parse(path)
+
+    prev = None
+    if prev_sie:
+        if not os.path.exists(prev_sie):
+            click.echo(f'Error: {prev_sie} not found', err=True)
+            sys.exit(1)
+        prev = sie_module.parse(prev_sie)
+
+    if output is None:
+        b = f'{sie.year_begins[:4]}-{sie.year_begins[4:6]}-{sie.year_begins[6:]}'
+        e = f'{sie.year_ends[:4]}-{sie.year_ends[4:6]}-{sie.year_ends[6:]}'
+        output = os.path.join(os.path.dirname(os.path.abspath(path)),
+                              f'Resultatrapport_{b}-{e}.ods')
+
+    generate_resultatrapport(sie, prev, output)
+    click.echo(f'Written {output}')
+    if prev:
+        click.echo(f'  Current year : {sie.year_begins} – {sie.year_ends}')
+        click.echo(f'  Previous year: {prev.year_begins} – {prev.year_ends}')
 
 
 # ─── underlag ────────────────────────────────────────────────────────────────
