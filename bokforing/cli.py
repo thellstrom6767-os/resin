@@ -2,11 +2,14 @@
 from __future__ import annotations
 import glob
 import os
+import subprocess
 import sys
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
 import click
+
+from . import underlag as underlag_module
 
 from . import sie as sie_module
 from .ledger import (find_account, get_account_history, get_balances,
@@ -341,3 +344,114 @@ def verify(ctx):
     else:
         click.echo(click.style(
             f'All {len(sie.vouchers)} vouchers in {path} balance. ✓', fg='green'))
+
+
+# ─── underlag ────────────────────────────────────────────────────────────────
+
+def _parse_ref(ref: str) -> tuple[str, int]:
+    """Parse 'A:5' or '5' into (series, number)."""
+    if ':' in ref:
+        series, num_str = ref.split(':', 1)
+    else:
+        series, num_str = 'A', ref
+    if not num_str.isdigit():
+        click.echo(f'Invalid voucher reference: {ref}  (expected e.g. A:5 or 5)', err=True)
+        sys.exit(1)
+    return series, int(num_str)
+
+
+@cli.group()
+@click.pass_context
+def underlag(ctx):
+    """Manage supporting documents (underlag) for vouchers."""
+    pass
+
+
+@underlag.command('add')
+@click.argument('ref')
+@click.argument('files', nargs=-1, required=True,
+                type=click.Path(exists=True, dir_okay=False))
+@click.pass_context
+def underlag_add(ctx, ref, files):
+    """Attach one or more files to a voucher.
+
+    REF: voucher reference, e.g. A:5 or 5
+
+    Example: bokforing underlag add A:5 receipt.pdf scan2.pdf
+    """
+    path = _resolve_ledger(ctx.obj)
+    series, number = _parse_ref(ref)
+
+    for src in files:
+        stored = underlag_module.add_file(path, series, number, src)
+        click.echo(f'Stored: {stored}  ←  {os.path.basename(src)}')
+
+
+@underlag.command('list')
+@click.argument('ref', required=False, default=None)
+@click.pass_context
+def underlag_list(ctx, ref):
+    """List stored underlag.
+
+    Without REF: summary of all vouchers that have underlag.
+    With REF (e.g. A:5): list files for that specific voucher.
+    """
+    path = _resolve_ledger(ctx.obj)
+    _, db_path = underlag_module._paths(path)
+
+    if ref:
+        series, number = _parse_ref(ref)
+        files = underlag_module.list_for_voucher(path, series, number)
+        if not files:
+            click.echo(f'No underlag for {series}:{number}.')
+            return
+        click.echo(f'\nUnderlag for {series}:{number}')
+        click.echo(f'  {"ID":>4}  {"Filename":<40}  {"Original":<30}  Added')
+        click.echo('  ' + '─' * 82)
+        for f in files:
+            click.echo(f'  {f["id"]:>4}  {f["filename"]:<40}  '
+                       f'{f["original_name"]:<30}  {f["added_at"]}')
+    else:
+        rows = underlag_module.list_all(path)
+        if not rows:
+            click.echo('No underlag stored yet.')
+            return
+        click.echo(f'\nUnderlag summary — {os.path.basename(path)}')
+        click.echo(f'  {"Voucher":<8}  {"Files":>5}')
+        click.echo('  ' + '─' * 16)
+        for r in rows:
+            click.echo(f'  {r["series"]}:{r["number"]:<6}  {r["count"]:>5}')
+    click.echo()
+
+
+@underlag.command('open')
+@click.argument('ref')
+@click.pass_context
+def underlag_open(ctx, ref):
+    """Open all underlag files for a voucher with the system viewer."""
+    path = _resolve_ledger(ctx.obj)
+    series, number = _parse_ref(ref)
+    files = underlag_module.list_for_voucher(path, series, number)
+
+    if not files:
+        click.echo(f'No underlag for {series}:{number}.')
+        return
+
+    underlag_dir, _ = underlag_module._paths(path)
+    for f in files:
+        filepath = os.path.join(underlag_dir, f['filename'])
+        click.echo(f'Opening {f["filename"]} …')
+        subprocess.Popen(['xdg-open', filepath])
+
+
+@underlag.command('remove')
+@click.argument('file_id', type=int)
+@click.pass_context
+def underlag_remove(ctx, file_id):
+    """Remove a stored underlag file by its ID (see 'underlag list')."""
+    path = _resolve_ledger(ctx.obj)
+    deleted = underlag_module.remove_file(path, file_id)
+    if deleted:
+        click.echo(f'Removed: {deleted}')
+    else:
+        click.echo(f'No file with ID {file_id}.', err=True)
