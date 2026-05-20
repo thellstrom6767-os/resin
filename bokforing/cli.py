@@ -446,6 +446,53 @@ def sie5export(ctx, output):
         click.echo('  (no underlag found — use "underlag add" to attach files)')
 
 
+@cli.command('sie5import')
+@click.argument('si5_file', type=click.Path(exists=True))
+@click.option('--output', '-o', default=None, metavar='FILE',
+              help='Output .se file (default: derived from company name and year)')
+@click.pass_context
+def sie5import(ctx, si5_file, output):
+    """Restore a ledger year from a SIE 5 package (.si5).
+
+    Writes a SIE 4 .se file and repopulates the underlag store with any
+    documents embedded in the package.
+
+    Note: #SRU codes are not stored in SIE 5 and will not be present
+    in the restored SIE 4 file.
+    """
+    from .sie5 import restore_from_sie5
+
+    if output is None:
+        # Peek at the XML to get company name and year before we do the full restore
+        import zipfile, xml.etree.ElementTree as _ET
+        _ns = {'s': 'http://www.sie.se/sie5'}
+        with zipfile.ZipFile(si5_file) as _zf:
+            _root = _ET.fromstring(_zf.read('sie5.xml'))
+        _co  = _root.find('s:FileInfo/s:Company', _ns)
+        _fy  = _root.find('s:FiscalYears/s:FiscalYear', _ns)
+        _name = (_co.get('Name', 'ledger') if _co is not None else 'ledger')
+        _yr   = (_fy.get('Start', '')[:4]  if _fy is not None else '')
+        stem  = _name.replace(' ', '_').replace('/', '-')
+        output = os.path.join(os.path.dirname(os.path.abspath(si5_file)),
+                              f'{stem}_{_yr}.se' if _yr else f'{stem}.se')
+
+    if os.path.exists(output):
+        if not click.confirm(f'{output} already exists. Overwrite?', default=False):
+            click.echo('Aborted.')
+            return
+
+    sie, n_docs = restore_from_sie5(si5_file, output)
+
+    click.echo(f'Restored {output}')
+    click.echo(f'  Company : {sie.company_name}  ({sie.org_nr})')
+    click.echo(f'  Period  : {_fmt_date(sie.year_begins)} – {_fmt_date(sie.year_ends)}')
+    click.echo(f'  Accounts: {len(sie.accounts)}  |  Vouchers: {len(sie.vouchers)}')
+    click.echo(f'  IB entries: {len(sie.ib)}  |  UB entries: {len(sie.ub)}')
+    click.echo(f'  Underlag documents restored: {n_docs}')
+    if not sie.accounts[0].sru if sie.accounts else True:
+        click.echo('  Note: SRU codes are not stored in SIE 5 — not present in restored file')
+
+
 # ─── underlag ────────────────────────────────────────────────────────────────
 
 def _parse_ref(ref: str) -> tuple[str, int]:

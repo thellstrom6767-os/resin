@@ -1,4 +1,4 @@
-"""Generate a SIE 5 package (.si5) combining SIE 4 ledger data with binary underlag.
+"""Generate and restore SIE 5 packages (.si5).
 
 SIE 5 is an XML-based format packaged as a zip file:
   ledger_2024.si5 (zip)
@@ -9,10 +9,14 @@ SIE 5 is an XML-based format packaged as a zip file:
 
 Specification reference: http://www.sie.se/sie5
 Schema version targeted: SIE 5.0 (2019-11-18)
+
+Round-trip note: SIE 5 does not carry #SRU codes, so those are lost
+when restoring a SIE 5 file back to SIE 4 format.
 """
 from __future__ import annotations
 
 import io
+import tempfile
 import os
 import zipfile
 from datetime import datetime
@@ -204,3 +208,156 @@ def generate_sie5(
             zf.write(fpath, f'documents/{filename}')
 
     return len(sie.vouchers), len(doc_refs)
+
+
+# ─── restore ──────────────────────────────────────────────────────────────────
+
+_TYPE_TO_KTYP: dict[str, str | None] = {
+    'Asset':     'T',
+    'Income':    'I',
+    'Cost':      'K',
+    'Liability': 'S',
+    'Equity':    None,
+}
+
+
+def restore_from_sie5(
+    si5_path: str,
+    output_sie4_path: str,
+) -> tuple[SIEFile, int]:
+    """Restore a SIE 4 ledger + underlag from a SIE 5 package.
+
+    Writes the SIE 4 file to output_sie4_path and populates the
+    companion underlag store.  Returns (sie, n_documents_restored).
+    """
+    from .models import Account, Transaction, Voucher
+    from .sie import write as write_sie4
+    from . import underlag as ul
+
+    ns = {'s': SIE5_NS}
+
+    with zipfile.ZipFile(si5_path, 'r') as zf:
+        zip_names = set(zf.namelist())
+        root = ET.fromstring(zf.read('sie5.xml'))
+
+        # ── FileInfo ──────────────────────────────────────────────────────
+        fi  = root.find('s:FileInfo', ns)
+        sp  = fi.find('s:SoftwareProduct', ns)  if fi is not None else None
+        fc  = fi.find('s:FileCreation', ns)     if fi is not None else None
+        co  = fi.find('s:Company', ns)           if fi is not None else None
+        adr = co.find('s:Address', ns)           if co is not None else None
+
+        program          = sp.get('Name', '')       if sp  is not None else ''
+        program_version  = sp.get('Version', '')    if sp  is not None else ''
+        gen_author       = fc.get('By', '')         if fc  is not None else ''
+        gen_time         = fc.get('Time', '')        if fc  is not None else ''
+        gen_date         = gen_time[:10].replace('-', '') if gen_time else ''
+        company_name     = co.get('Name', '')       if co  is not None else ''
+        org_nr_raw       = co.get('OrganizationId', '') if co is not None else ''
+        org_nr = (f'{org_nr_raw[:6]}-{org_nr_raw[6:]}'
+                  if len(org_nr_raw) == 10 else org_nr_raw)
+        street   = adr.get('Street', '')      if adr is not None else ''
+        postal   = adr.get('PostalCode', '')  if adr is not None else ''
+        city     = adr.get('City', '')        if adr is not None else ''
+        zip_city = f'{postal} {city}'.strip()
+
+        # ── FiscalYear ────────────────────────────────────────────────────
+        fy       = root.find('s:FiscalYears/s:FiscalYear', ns)
+        year_beg = fy.get('Start', '').replace('-', '') if fy is not None else ''
+        year_end = fy.get('End',   '').replace('-', '') if fy is not None else ''
+        currency = fy.get('AccountingCurrency', 'SEK') if fy is not None else 'SEK'
+
+        # ── AccountingPlan ────────────────────────────────────────────────
+        accounts: list[Account] = []
+        ib: dict[str, Decimal] = {}
+        ub: dict[str, Decimal] = {}
+
+        for acc_el in root.findall('s:AccountingPlan/s:Account', ns):
+            number = acc_el.get('Id', '')
+            label  = acc_el.get('Name', '')
+            ktyp   = _TYPE_TO_KTYP.get(acc_el.get('Type', ''))
+            accounts.append(Account(number=number, label=label, ktyp=ktyp))
+
+            ob = acc_el.find('s:OpeningBalance', ns)
+            if ob is not None:
+                ib[number] = Decimal(ob.get('amount', '0'))
+
+            cb = acc_el.find('s:ClosingBalance', ns)
+            if cb is not None:
+                ub[number] = Decimal(cb.get('amount', '0'))
+
+        # ── Document manifest: id → filename ──────────────────────────────
+        doc_manifest: dict[str, str] = {
+            el.get('Id', ''): el.get('Name', '')
+            for el in root.findall('s:Documents/s:Document', ns)
+        }
+
+        # ── Journals → vouchers ───────────────────────────────────────────
+        vouchers: list[Voucher] = []
+        voucher_doc_ids: dict[tuple[str, int], list[str]] = {}
+
+        for journal in root.findall('s:Journals/s:Journal', ns):
+            series = journal.get('Id', 'A')
+            for entry in journal.findall('s:JournalEntry', ns):
+                number   = int(entry.get('Id', '0'))
+                v_date   = entry.get('JournalDate', '').replace('-', '')
+                label    = entry.get('Text', '')
+                reg_date = entry.get('OriginalEntryDate', '').replace('-', '')
+                sig      = entry.get('CreatedBy', '')
+
+                transactions = [
+                    Transaction(
+                        account=le.get('AccountId', ''),
+                        amount =Decimal(le.get('Amount', '0')),
+                        date   =v_date,
+                        label  =le.get('Text', ''),
+                    )
+                    for le in entry.findall('s:LedgerEntry', ns)
+                ]
+                vouchers.append(Voucher(series=series, number=number,
+                                        date=v_date, label=label,
+                                        reg_date=reg_date, signature=sig,
+                                        transactions=transactions))
+
+                refs = [dr.get('DocumentId', '')
+                        for dr in entry.findall('s:DocumentReference', ns)]
+                if refs:
+                    voucher_doc_ids[(series, number)] = refs
+
+        # ── Build SIEFile and write SIE 4 ────────────────────────────────
+        sie = SIEFile(
+            program=program, program_version=program_version,
+            gen_date=gen_date, gen_author=gen_author,
+            org_nr=org_nr, company_name=company_name,
+            street=street, zip_city=zip_city,
+            year_begins=year_beg, year_ends=year_end,
+            currency=currency,
+            accounts=accounts, ib=ib, ub=ub, vouchers=vouchers,
+        )
+        write_sie4(output_sie4_path, sie)
+
+        # ── Restore underlag ──────────────────────────────────────────────
+        n_docs = 0
+        if not voucher_doc_ids or not doc_manifest:
+            return sie, n_docs
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Extract all document files once into tmpdir
+            for filename in doc_manifest.values():
+                zip_entry = f'documents/{filename}'
+                if zip_entry in zip_names:
+                    zf.extract(zip_entry, tmpdir)
+
+            # Register each document against its voucher in order
+            for (series, number), doc_ids in voucher_doc_ids.items():
+                for doc_id in doc_ids:
+                    filename = doc_manifest.get(doc_id, '')
+                    if not filename:
+                        continue
+                    src = os.path.join(tmpdir, 'documents', filename)
+                    if not os.path.exists(src):
+                        continue
+                    ul.add_file(output_sie4_path, series, number, src)
+                    n_docs += 1
+
+    return sie, n_docs
