@@ -413,6 +413,39 @@ def balansrapport(ctx, output):
     click.echo(f'Written {output}')
 
 
+# ─── sie5export ──────────────────────────────────────────────────────────────
+
+@cli.command('sie5export')
+@click.option('--output', '-o', default=None, metavar='FILE',
+              help='Output .si5 file (default: CompanyName_YYYY-MM-DD-YYYY-MM-DD.si5)')
+@click.pass_context
+def sie5export(ctx, output):
+    """Export a SIE 5 package (.si5) combining the ledger with any attached underlag.
+
+    The resulting file is a zip archive containing sie5.xml plus every
+    underlag file linked to a voucher, referenced from the XML.
+    """
+    from .sie5 import generate_sie5
+
+    path = _resolve_ledger(ctx.obj)
+    sie  = sie_module.parse(path)
+
+    if output is None:
+        b     = f'{sie.year_begins[:4]}-{sie.year_begins[4:6]}-{sie.year_begins[6:]}'
+        e     = f'{sie.year_ends[:4]}-{sie.year_ends[4:6]}-{sie.year_ends[6:]}'
+        stem  = sie.company_name.replace(' ', '_').replace('/', '-')
+        output = os.path.join(os.path.dirname(os.path.abspath(path)),
+                              f'{stem}_{b}_{e}.si5')
+
+    n_vouchers, n_docs = generate_sie5(sie, path, output)
+
+    size_kb = os.path.getsize(output) / 1024
+    click.echo(f'Written {output}  ({size_kb:.1f} KB)')
+    click.echo(f'  {n_vouchers} vouchers,  {n_docs} attached documents')
+    if n_docs == 0:
+        click.echo('  (no underlag found — use "underlag add" to attach files)')
+
+
 # ─── underlag ────────────────────────────────────────────────────────────────
 
 def _parse_ref(ref: str) -> tuple[str, int]:
