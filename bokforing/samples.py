@@ -73,7 +73,7 @@ def format_for_ai(samples: list[dict], account_map: dict) -> str:
     """Format samples as text for inclusion in the AI system prompt."""
     if not samples:
         return ''
-    lines = ['Example vouchers (curated account patterns — use these to guide account selection):']
+    lines = ['IMPORTANT — Example vouchers saved by the user. When the document matches a sample (same vendor or transaction type), use those exact account numbers. Do not substitute different accounts:']
     for s in samples:
         notes_suffix = f'  # {s["notes"]}' if s.get('notes') else ''
         lines.append(f'  {s["description"]}{notes_suffix}')

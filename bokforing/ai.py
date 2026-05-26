@@ -186,6 +186,7 @@ Rules:
 - Extract the date from the document itself; do not use today's date.
 - If a value is unclear set confidence to "low" and explain in notes.
 - Never guess amounts. If the total is unclear, say so in notes.
+- If a sample voucher above matches the vendor or transaction type in this document, use those exact account numbers — do not substitute your own choice.
 - Use tool suggest_voucher to return your answer."""
 
     media_type, b64 = _encode(file_path)
